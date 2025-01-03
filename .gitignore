@@ -1,0 +1,81 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+#  Usually these files are written by a python script from a template
+#  before the actual PyInstaller freeze step.
+*.log
+*.spec
+
+# PyInstaller --onefile
+#  Include single picture files separately in the bundle.
+*.png
+*.jpg
+*.jpeg
+*.ogv
+*.mp4
+*.ico
+*.icns
+
+# Kitware source files
+*.kw
+
+# Virtual Environments
+#  Normally these are only used by a python script, so we'll ignore them
+#  in the git repo.
+!.venv/
+!.venv*/
+venv/
+venv*/
+
+# Spyder project settings
+.spyderproject
+
+# Rope project settings
+.ropeproject
+
+# MPL Data files
+__mpl-data/
+
+# IPython
+profile_default/
+ipython_config.py
+
+# PyCharm files
+.idea/
+
+# VSCode files
+.vscode/
+
+# Git files
+.git/
+
+# Mac files
+.DS_Store
+
+# Repository metadata
+.gitignore
