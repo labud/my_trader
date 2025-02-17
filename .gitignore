@@ -81,3 +81,4 @@ ipython_config.py
 .gitignore
 
 market_data/
+output/

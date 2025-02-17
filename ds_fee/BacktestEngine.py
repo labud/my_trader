@@ -102,8 +102,8 @@ class BacktestEngine:
                     'qty': qty,
                     'price_spot': row['close_spot'],
                     'price_future': row['close_future'],
-                    'pnl': 0,  # 初始化pnl字段
-                    'exit_time': None  # 平仓时更新
+                    'pnl': 0,
+                    'exit_time': None
                 })
             
             # 平仓逻辑
@@ -111,20 +111,16 @@ class BacktestEngine:
                 (row.name - portfolio['trades'][-1]['timestamp']).total_seconds() >= params['max_hold_seconds'] 
                 or expected_profit <= 0
             ):
-                # 计算平仓收益
-                # 计算持仓时间和资金费用
-                # 确保时间戳类型正确
                 entry_time = portfolio['trades'][-1]['timestamp']
                 exit_time = row.name
                 if isinstance(entry_time, pd.Timestamp) and isinstance(exit_time, pd.Timestamp):
                     holding_seconds = (exit_time - entry_time).total_seconds()
                 else:
-                    holding_seconds = 0  # 异常情况处理
+                    holding_seconds = 0
                 holding_hours = holding_seconds / 3600
-                funding_times = int(holding_hours // 8)  # 每8小时收取一次资金费
+                funding_times = int(holding_hours // 8)
                 funding_pnl = portfolio['position'] * row['funding_rate'] * funding_times
                 
-                # 计算价差收益
                 spread_pnl = portfolio['position'] * (
                     (row['close_future'] - portfolio['trades'][-1]['price_future']) -
                     (row['close_spot'] - portfolio['trades'][-1]['price_spot'])
@@ -134,11 +130,15 @@ class BacktestEngine:
                 
                 portfolio['cash'] += pnl
                 portfolio['position'] = 0
-                portfolio['trades'][-1]['pnl'] = pnl
-                portfolio['trades'][-1]['exit_time'] = idx
+                portfolio['trades'][-1].update({
+                    'pnl': pnl,
+                    'exit_time': idx,
+                    'spread_pnl': spread_pnl,
+                    'funding_pnl': funding_pnl,
+                    'total_pnl': pnl
+                })
                 
             # 记录权益曲线
-            # 记录带时间戳的权益值
             portfolio['equity'].append({
                 'timestamp': row.name,
                 'value': portfolio['cash'] + portfolio['position'] * (
@@ -146,7 +146,6 @@ class BacktestEngine:
                 )
             })
             
-        # 生成回测报告
         # 生成回测报告
         results = {
             'final_equity': portfolio['cash'],
@@ -158,13 +157,10 @@ class BacktestEngine:
             'trades': portfolio['trades']
         }
         
-        # 保存交易记录和风险指标
-        self._save_results(results)
-        
+        self._save_results(results, params)
         return results
         
     def _calculate_max_drawdown(self, equity_curve):
-        """计算最大回撤"""
         values = [e['value'] for e in equity_curve]
         peak = values[0]
         max_drawdown = 0
@@ -177,73 +173,154 @@ class BacktestEngine:
         return max_drawdown
         
     def _calculate_win_rate(self, trades):
-        """计算胜率"""
         if not trades:
             return 0
         winning_trades = [t for t in trades if t.get('pnl', 0) > 0]
         return len(winning_trades) / len(trades)
         
     def _calculate_sharpe_ratio(self, equity_curve):
-        """计算年化夏普比率"""
-        # 转换数据结构为带时间戳的DataFrame
         equity_df = pd.DataFrame(equity_curve).set_index('timestamp').sort_index()
-        # 计算收益率
         try:
             returns = equity_df['value'].astype(float).pct_change().dropna()
         except KeyError:
             return 0
         if returns.empty:
             return 0
-        risk_free_rate = 0.04  # 假设无风险利率4%
-        # 计算分钟级无风险利率
+        risk_free_rate = 0.04
         risk_free_per_minute = risk_free_rate / (252 * 1440)
         excess_returns = returns - risk_free_per_minute
-        # 计算年化夏普比率
         if excess_returns.std() == 0:
             return 0
         sharpe = excess_returns.mean() / excess_returns.std() * np.sqrt(252 * 1440)
         return float(sharpe)
     
-    def _save_results(self, results):
-        """保存回测结果到CSV文件"""
-        # 保存交易记录
+    def _save_results(self, results, params):
         trades_df = pd.DataFrame(results['trades'])
         trades_df['timestamp'] = pd.to_datetime(trades_df['timestamp'])
         trades_df['exit_time'] = pd.to_datetime(trades_df['exit_time'])
         trades_df.to_csv(os.path.join(self.output_dir, 'trades.csv'), index=False)
         
-        # 保存持仓记录
         positions_df = pd.DataFrame([
-            {
-                'timestamp': e['timestamp'],
-                'position': e['value'] - results['final_equity'] + e['value']
-            } 
+            {'timestamp': e['timestamp'], 'position': e['value'] - results['final_equity'] + e['value']} 
             for e in results['equity_curve']
         ])
         positions_df.to_csv(os.path.join(self.output_dir, 'positions.csv'), index=False)
         
-        # 保存风险指标
+        initial_capital = params.get('initial_capital', 100000)
+        total_profit = results['final_equity'] - initial_capital
+        
+        start_time = pd.to_datetime(results['equity_curve'][0]['timestamp'])
+        end_time = pd.to_datetime(results['equity_curve'][-1]['timestamp'])
+        total_days = (end_time - start_time).days + 1
+        
+        annualized_return = (1 + total_profit/initial_capital) ** (365/total_days) - 1 if total_days > 0 else 0
+        
+        total_funding = sum(t.get('funding_pnl',0) for t in results['trades'])
+        funding_ratio = total_funding / total_profit if total_profit != 0 else 0
+        
+        equity_df = pd.DataFrame(results['equity_curve'])
+        equity_df['timestamp'] = pd.to_datetime(equity_df['timestamp'])
+        equity_df.set_index('timestamp', inplace=True)
+        monthly_returns = equity_df['value'].resample('M').last().pct_change().dropna()
+        monthly_volatility = monthly_returns.std() * np.sqrt(12) if not monthly_returns.empty else 0
+
         risk_metrics = {
+            'final_equity': results['final_equity'],
             'max_drawdown': results['max_drawdown'],
             'annualized_volatility': np.std([e['value'] for e in results['equity_curve']]) * np.sqrt(252*1440),
             'sharpe_ratio': results['sharpe_ratio'],
-            'var_95': np.percentile([e['value'] for e in results['equity_curve']], 5)
+            'var_95': np.percentile([e['value'] for e in results['equity_curve']], 5),
+            'annualized_return': annualized_return,
+            'funding_ratio%': funding_ratio * 100,
+            'monthly_volatility': monthly_volatility,
+            'total_days': total_days
         }
         pd.DataFrame([risk_metrics]).to_csv(os.path.join(self.output_dir, 'risk_metrics.csv'), index=False)
+        results['risk_metrics'] = risk_metrics
+
+    def print_backtest_results(self, results, params):
+        print(f"\n========== 回测结果汇总 =========="
+            f"\n初始资金: {params['initial_capital']:,.2f}"
+            f"\n最终资金: {results['final_equity']:,.2f}"
+            f"\n盈亏金额: {results['final_equity'] - params['initial_capital']:+,.2f}"
+            f"\n总交易次数: {results['total_trades']}"
+            f"\n胜率: {results['win_rate']:.2%}"
+            f"\n最大回撤: {results['max_drawdown']:.2%}"
+            f"\n夏普比率: {results['sharpe_ratio']:.2f}"
+            f"\n年化收益率: {results['risk_metrics']['annualized_return']:.2%}"
+            f"\n资金费收益占比: {results['risk_metrics']['funding_ratio%']:.2f}%"
+            f"\n月度波动率: {results['risk_metrics']['monthly_volatility']:.4f}"
+            f"\n回测总天数: {results['risk_metrics']['total_days']}天"
+            f"\n===================================")
+
+    def visualize_results(self, results, save_to_file=True):
+        try:
+            import matplotlib.pyplot as plt
+            import matplotlib.dates as mdates
+            
+            plt.rcParams['figure.figsize'] = (14, 8)
+            plt.rcParams['figure.dpi'] = 100
+            
+            timestamps = [pd.to_datetime(e['timestamp']) for e in results['equity_curve']]
+            equity_values = [e['value'] for e in results['equity_curve']]
+            spot_prices = [row.close_spot for row in self.preprocessed_data.itertuples()]
+            future_prices = [row.close_future for row in self.preprocessed_data.itertuples()]
+
+            fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(14, 10), sharex=True)
+            plt.subplots_adjust(hspace=0.3)
+            
+            ax1.plot(timestamps, spot_prices, label='Spot Price', linewidth=1)
+            ax1.plot(timestamps, future_prices, label='Future Price', linewidth=1)
+            
+            buy_signals = [pd.to_datetime(t['timestamp']) for t in results['trades'] 
+                         if t.get('pnl', 0) > 0 and t['exit_time'] is not None]
+            sell_signals = [pd.to_datetime(t['timestamp']) for t in results['trades'] 
+                          if t.get('pnl', 0) <= 0 and t['exit_time'] is not None]
+            ax1.scatter(buy_signals, [self.preprocessed_data.loc[ts].close_spot for ts in buy_signals], 
+                      marker='^', color='g', s=100, label='Buy')
+            ax1.scatter(sell_signals, [self.preprocessed_data.loc[ts].close_spot for ts in sell_signals], 
+                      marker='v', color='r', s=100, label='Sell')
+            ax1.set_title('Price & Trading Signals')
+            ax1.legend()
+            ax1.grid(True)
+
+            positions = [e['value'] - results['final_equity'] + e['value'] for e in results['equity_curve']]
+            ax2.fill_between(timestamps, positions, alpha=0.3, color='b', label='Position')
+            ax2.set_ylabel('Position')
+            ax2.grid(True)
+
+            ax3.plot(timestamps, equity_values, label='Equity')
+            max_dd_start = timestamps[np.argmax(np.maximum.accumulate(equity_values) - equity_values)]
+            max_dd_end = timestamps[np.argmax(equity_values[:np.argmax(np.maximum.accumulate(equity_values) - equity_values)])]
+            ax3.axvspan(max_dd_start, max_dd_end, alpha=0.3, color='red', label='Max Drawdown')
+            ax3.set_title('Equity Curve')
+            ax3.legend()
+            ax3.grid(True)
+
+            plt.xticks(rotation=45)
+            plt.tight_layout()
+            
+            if save_to_file:
+                output_path = os.path.join(self.output_dir, 'backtest_result.png')
+                plt.savefig(output_path, bbox_inches='tight', dpi=150)
+                print(f"\n可视化结果已保存至：{output_path}")
+                
+            plt.show()
+            
+        except ImportError:
+            print("提示：安装matplotlib可查看资金曲线 → pip install matplotlib")
 
 if __name__ == "__main__":
     def main():
-        """测试回测引擎的示例主函数"""
         try:
             engine = BacktestEngine()
             
-            # 示例参数配置
             params = {
-                "spread_threshold": 0.005,      # 价差阈值 0.5%
-                "leverage": 3,                  # 3倍杠杆
-                "max_hold_seconds": 4 * 3600,   # 最大持仓4小时
-                "fee_rate": 0.0002,             # 交易费率0.02%
-                "initial_capital": 100000       # 初始资金10万
+                "spread_threshold": 0.005,
+                "leverage": 3,
+                "max_hold_seconds": 4 * 3600,
+                "fee_rate": 0.0002,
+                "initial_capital": 1500
             }
             
             print("正在预处理数据...")
@@ -252,75 +329,12 @@ if __name__ == "__main__":
             print("开始回测...")
             results = engine.run_backtest(params)
             
-            # 打印关键结果
-            print(f"\n回测结果："
-                f"\n最终权益：{results['final_equity']:.2f}"
-                f"\n总交易次数：{results['total_trades']}"
-                f"\n胜率：{results['win_rate']:.2%}"
-                f"\n最大回撤：{results['max_drawdown']:.2%}"
-                f"\n夏普比率：{results['sharpe_ratio']:.2f}")
-            
-            # 绘制资金曲线
-            try:
-                import matplotlib.pyplot as plt
-                import matplotlib.dates as mdates
-                plt.figure(figsize=(12, 6))
-                # 提取时间戳和权益值
-                timestamps = [pd.to_datetime(e['timestamp']) for e in results['equity_curve']]
-                equity_values = [e['value'] for e in results['equity_curve']]
-                
-                # 创建3个子图
-                fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(14, 10), sharex=True)
-                
-                # 主图：价格和买卖信号
-                # 获取价格数据
-                spot_prices = [row.close_spot for row in engine.preprocessed_data.itertuples()]
-                future_prices = [row.close_future for row in engine.preprocessed_data.itertuples()]
-                
-                ax1.plot(timestamps, spot_prices, label='Spot Price', linewidth=1)
-                ax1.plot(timestamps, future_prices, label='Future Price', linewidth=1)
-                
-                # 标记买卖信号
-                # 安全获取pnl值，处理未平仓交易
-                buy_signals = [pd.to_datetime(t['timestamp']) for t in results['trades'] 
-                             if t.get('pnl', 0) > 0 and t['exit_time'] is not None]
-                sell_signals = [pd.to_datetime(t['timestamp']) for t in results['trades'] 
-                              if t.get('pnl', 0) <= 0 and t['exit_time'] is not None]
-                ax1.scatter(buy_signals, [engine.preprocessed_data.loc[ts].close_spot for ts in buy_signals], 
-                          marker='^', color='g', s=100, label='Buy')
-                ax1.scatter(sell_signals, [engine.preprocessed_data.loc[ts].close_spot for ts in sell_signals], 
-                          marker='v', color='r', s=100, label='Sell')
-                ax1.set_title('Price & Trading Signals')
-                ax1.legend()
-                ax1.grid(True)
-
-                # 中图：仓位变化
-                positions = [e['value'] - results['final_equity'] + e['value'] for e in results['equity_curve']]
-                ax2.fill_between(timestamps, positions, alpha=0.3, color='b', label='Position')
-                ax2.set_ylabel('Position')
-                ax2.grid(True)
-
-                # 下图：资金曲线和最大回撤
-                ax3.plot(timestamps, equity_values, label='Equity')
-                # 标注最大回撤区间
-                max_dd_start = timestamps[np.argmax(np.maximum.accumulate(equity_values) - equity_values)]
-                max_dd_end = timestamps[np.argmax(equity_values[:np.argmax(np.maximum.accumulate(equity_values) - equity_values)])]
-                ax3.axvspan(max_dd_start, max_dd_end, alpha=0.3, color='red', label='Max Drawdown')
-                ax3.set_title('Equity Curve')
-                ax3.legend()
-                ax3.grid(True)
-
-                # 优化时间轴显示
-                plt.xticks(rotation=45)
-                plt.tight_layout()
-                plt.show()
-            except ImportError:
-                print("提示：安装matplotlib可查看资金曲线 → pip install matplotlib")
+            engine.print_backtest_results(results, params)
+            engine.visualize_results(results)
                 
         except FileNotFoundError as e:
             print(f"数据加载失败：{e}\n请检查market_data目录结构是否符合要求")
         except Exception as e:
             print(f"回测异常：{str(e)}")
-            raise e
 
     main()
