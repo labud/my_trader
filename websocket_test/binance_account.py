@@ -38,8 +38,20 @@ def getAcccountInfo(ws):
 
 def main():
     ws = websocket.create_connection('wss://ws-api.binance.com:443/ws-api/v3')
-    result = getAcccountInfo(ws)
-    print(json.dumps(json.loads(result), indent=4))
+
+    times = []
+    for i in range(0, 10):
+        start = time.time()
+        result = getAcccountInfo(ws)
+        end = time.time()
+        print(end -  start)
+        times.append(end - start)
+    max_value = max(times)
+    min_value = min(times)
+    avg_value = 0 if len(times) == 0 else sum(times) / len(times)
+    print("max_value:", max_value)
+    print("min_value:", min_value)
+    print("avg_value", avg_value)
 
 
 if __name__ == "__main__":

@@ -79,3 +79,5 @@ ipython_config.py
 
 # Repository metadata
 .gitignore
+
+market_data/
