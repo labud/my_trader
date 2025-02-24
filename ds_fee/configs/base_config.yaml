@@ -1,0 +1,11 @@
+# 最小必要基础配置
+symbol: "BTC/USDT"
+initial_balance: 100000.0
+
+# 数据存储目录配置
+data_dir: "ds_fee/market_data/"
+
+# 以下参数将由引擎自动设置
+# backtest时间范围根据实际数据自动确定 
+# fee_rate使用实际资金费率
+# 策略参数通过优化器动态优化
