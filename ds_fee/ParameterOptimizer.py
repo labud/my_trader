@@ -166,7 +166,7 @@ class ParameterOptimizer:
                 return processed_result
             print("✅ 并行任务已成功启动", flush=True)
             # 执行并行任务并实时处理结果
-            with Parallel(n_jobs=n_jobs, verbose=50, timeout=3600) as parallel:
+            with Parallel(n_jobs=n_jobs, verbose=5, timeout=3600) as parallel:
                 results = []
                 for result in parallel(delayed(task_wrapper)(params) for params in grid):
                     results.append(result)
@@ -217,7 +217,6 @@ class ParameterOptimizer:
         
         # 创建引擎并注入动态参数
         engine = BacktestEngine(config_dict)
-        engine.preprocess_data(verbose=verbose)  # 预处理数据获取实际参数
         # 更新配置参数并设置默认手续费率
         actual_fee_rate = engine.actual_funding_rate or 0.0002  # 默认0.02%
         config_dict.update({
@@ -507,7 +506,9 @@ if __name__ == "__main__":
         'leverage': [2, 3, 4],                     # 杠杆倍数优化选项
         'max_hold_seconds': [3600, 7200, 14400],   # 持仓时间1-4小时
         'take_profit': np.round(np.linspace(0.004, 0.012, 4), 4),  # 止盈0.4%-1.2%
-        'stop_loss': np.round(np.linspace(0.003, 0.008, 4), 4)     # 止损0.3%-0.8%
+        'stop_loss': np.round(np.linspace(0.003, 0.008, 4), 4),     # 止损0.3%-0.8%
+        'min_funding_rate': np.round(np.linspace(0.0005, 0.002, 4), 4),  # 最低资金费率0.05%-0.2%
+        'risk_per_trade': [0.01, 0.02, 0.03]  # 单笔交易风险1%-3%
     }
     optimizer = ParameterOptimizer(base_config, param_space)
 
