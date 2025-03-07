@@ -1,7 +1,9 @@
 import numpy as np
 import pandas as pd
+from pandas import DataFrame
 import os
 import json
+import multiprocessing
 from datetime import datetime
 from sklearn.model_selection import ParameterGrid
 from joblib import Parallel, delayed
@@ -31,20 +33,6 @@ class OptimizationConfig:
         return cls(**config_dict)
 
 class OptimizationDashboard:
-    def __init__(self):
-        self.top_params = []
-        self.total_tasks = 0
-        self.completed = 0
-        
-    def start_progress(self, total):
-        self.total_tasks = total
-        self.completed = 0
-        print(f"开始参数优化，总任务数: {total}")
-        
-    def update_progress(self, advance=1):
-        self.completed += advance
-        print(f"进度: {self.completed}/{self.total_tasks} ({self.completed/self.total_tasks:.1%})")
-        
     def print_best_result(self, results):
         # 过滤无效结果
         valid_results = [r for r in results if r.get('metrics')]
@@ -72,206 +60,164 @@ class OptimizationDashboard:
             print(f"  最大回撤: {best_profit['metrics']['max_drawdown']:.2%}")
             print(f"  是否合格: {'✅' if best_profit['qualified'] else '❌'}")
 
+def serialize_preprocessed_data(df: DataFrame) -> dict:
+    """序列化预处理数据为可传输格式"""
+    return {
+        'features': df.values.tolist(),  # 统一使用features作为数据键
+        'index': df.index.tolist(),
+        'columns': df.columns.tolist()
+    }
+
+def deserialize_preprocessed_data(data_dict: dict) -> DataFrame:
+    """反序列化预处理数据为DataFrame"""
+    return DataFrame(
+        data=data_dict['features'],  # 同步修改为features
+        index=pd.to_datetime(data_dict['index']),
+        columns=data_dict['columns']
+    )
+
+def is_qualified(metrics, optimization_config):
+    """检查参数组合是否满足风控要求（全局函数版本）"""
+    return (
+        metrics['annualized_return'] >= optimization_config.min_annual_return and
+        metrics['max_drawdown'] <= optimization_config.max_drawdown and
+        metrics['sharpe_ratio'] >= optimization_config.min_sharpe and
+        metrics['win_rate'] >= optimization_config.min_win_rate
+    )
+
+def evaluate_params(params, serializable_data, optimization_config, verbose=False):
+    """执行单个参数组合的回测评估（全局函数版本）"""
+    if verbose:
+        print(f"\n🔍 开始回测参数组合:", flush=True)
+        for k,v in params.items():
+            print(f"  {k}: {v}", flush=True)
+    
+    # 直接从序列化数据获取预处理结果
+    try:
+        # 合并基础配置参数（包含fee_rate）
+        full_config = {
+            **serializable_data['base_config'],  # 基础配置参数
+            **params,                            # 优化参数
+            'output_dir': 'output'
+        }
+        
+        # 使用预处理的配置和数据直接初始化引擎
+        engine = BacktestEngine(config=full_config)
+        engine.preprocessed_data = deserialize_preprocessed_data(serializable_data['preprocessed_data'])
+        
+    except KeyError as e:
+        raise ValueError(f"Invalid serialized data format: {str(e)}") from e
+    
+    results = engine.run_backtest(full_config, verbose=verbose, saveResults=False)
+    
+    metrics = results.get('risk_metrics', {})
+    return {
+        'params': params.copy(),
+        'metrics': {
+            'annualized_return': metrics.get('annualized_return', -np.inf),
+            'max_drawdown': metrics.get('max_drawdown', 1.0),
+            'sharpe_ratio': metrics.get('sharpe_ratio', -np.inf),
+            'profit_factor': metrics.get('profit_factor', 0),
+            'win_rate': metrics.get('win_rate', 0),
+            'volatility': metrics.get('annualized_volatility', np.inf)
+        },
+        'qualified': is_qualified(metrics, optimization_config) if metrics else False,
+        'error': None
+    }
+
+def process_result(result, shared_completed, shared_best_score, shared_lock, total_combinations):
+    """处理单个结果（全局函数版本）"""
+    with shared_lock:
+        shared_completed.value += 1
+        elapsed = pd.Timestamp.now().strftime('%H:%M:%S')
+        print(f"[{elapsed}] 已完成 {shared_completed.value}/{total_combinations} ({shared_completed.value/total_combinations:.1%})")
+        
+        if result and result.get('error'):
+            print(f"⚠️ 参数组合 {result['params']} 执行失败: {result['error']}")
+            return result
+            
+        if result and result.get('metrics'):
+            current_score = result['metrics']['sharpe_ratio']
+            if current_score > shared_best_score.value:
+                shared_best_score.value = current_score
+                print(f"\n🌟 发现新的最佳组合（夏普比率:{current_score:.2f}）:")
+                for k, v in result['params'].items():
+                    print(f"   ├ {k}: {v}")
+                print(f"   ├ 年化收益: {result['metrics']['annualized_return']:.2%}")
+                print(f"   └ 最大回撤: {result['metrics']['max_drawdown']:.2%}")
+        return result
+
+# 创建全局任务包装函数
+def task_wrapper(params, serializable_data, optimization_config, verbose,
+                shared_completed, shared_best_score, shared_lock, total_combinations):
+    """并行任务包装函数"""
+    try:
+        result = evaluate_params(
+            params=params,
+            serializable_data=serializable_data,
+            optimization_config=optimization_config,
+            verbose=verbose
+        )
+    except Exception as e:
+        return {'params': params, 'error': str(e)}
+    return process_result(
+        result=result,
+        shared_completed=shared_completed,
+        shared_best_score=shared_best_score,
+        shared_lock=shared_lock,
+        total_combinations=total_combinations
+    )
+        
 class ParameterOptimizer:
     def __init__(self, base_config, param_space, optimization_config=None):
+        # 转换配置对象为字典格式
         self.base_config = base_config
         self.param_space = param_space
         self.optimization_config = optimization_config or OptimizationConfig()
         self.dashboard = OptimizationDashboard()
+        self.manager = multiprocessing.Manager()
+        self.shared_completed = self.manager.Value('i', 0)
+        self.shared_best_score = self.manager.Value('d', -np.inf)
+        self.shared_lock = self.manager.Lock()
 
-    def _is_qualified(self, metrics):
-        """检查参数组合是否满足风控要求"""
-        return (
-            metrics['annualized_return'] >= self.optimization_config.min_annual_return and
-            metrics['max_drawdown'] <= self.optimization_config.max_drawdown and
-            metrics['sharpe_ratio'] >= self.optimization_config.min_sharpe and
-            metrics['win_rate'] >= self.optimization_config.min_win_rate
-        )
-    
-    best_score = -np.inf
-    best_params = None
-    completed = 0
-
-    # 创建进度回调函数
     def grid_search(self, data, n_jobs=-1, verbose=False):
         """并行化网格搜索优化"""
         grid = list(ParameterGrid(self.param_space))
         total_combinations = len(grid)
-        self.dashboard.start_progress(total_combinations)
         
         print(f"\n🔧 正在初始化{total_combinations}个参数组合...", flush=True)
         print(f"⚙️ 启动{n_jobs if n_jobs != -1 else '全部'}个并行工作进程", flush=True)
         print(f"🕒 开始时间: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}", flush=True)
 
-        # 初始化最佳结果跟踪
-        self.best_score = -np.inf
-        self.best_params = None
-
-        # 原子操作进度跟踪
-        from joblib.externals.loky import get_reusable_executor
+        # 将预处理数据和基础配置序列化
+        serializable_data = {
+            'base_config': self.base_config,  # 包含所有基础配置参数
+            'preprocessed_data': serialize_preprocessed_data(data)
+        }
         
-        def process_result(result):
-            # 使用原子操作更新进度
-            self.completed += 1
-            elapsed = pd.Timestamp.now().strftime('%H:%M:%S')
-            print(f"[{elapsed}] 已完成 {self.completed}/{total_combinations} ({self.completed/total_combinations:.1%})")
-            print(str(result))
-            if result and result['metrics']:
-                # 使用线程安全的方式更新最佳结果
-                current_score = result['metrics']['sharpe_ratio']
-                if current_score > self.best_score:
-                    self.best_score = current_score
-                    self.best_params = result['params'].copy()
-                    print(f"\n🌟 发现新的最佳组合（夏普比率:{current_score:.2f}）:")
-                    for k, v in self.best_params.items():
-                        print(f"   ├ {k}: {v}")
-                    print(f"   ├ 年化收益: {result['metrics']['annualized_return']:.2%}")
-                    print(f"   └ 最大回撤: {result['metrics']['max_drawdown']:.2%}")
-            return result
-
-        try:
-            # 将数据预处理为可序列化格式
-            serializable_data = {
-                'features': data.values.astype(np.float64).tolist(),
-                'index': data.index.tz_localize(None).astype('datetime64[ns]').astype(np.int64).tolist(),
-                'columns': data.columns.tolist(),
-                'dtypes': {
-                    'index': 'datetime64[ns]',
-                    'features': 'float64'
-                }
-            }
-            
-            # 添加并行任务启动前检查点
-            print(f"🔍 正在启动并行任务，首个参数组合示例: {grid[0]}", flush=True)
-            print(f"🔍 最后一个参数组合示例: {grid[-1]}", flush=True)
-            print(f"🔍 序列化数据类型检查: {type(serializable_data)} 长度: {len(serializable_data['features'])}", flush=True)
-            
-            # 启用joblib详细日志并添加超时设置
-            # 显式收集结果并触发回调
-            # 先序列化数据（避免在并行任务中重复处理）
-            serializable_data = {
-                'features': data.values.astype(np.float64).tolist(),
-                'index': data.index.tz_localize(None).astype('datetime64[ns]').astype(np.int64).tolist(),
-                'columns': data.columns.tolist(),
-                'dtypes': {
-                    'index': 'datetime64[ns]',
-                    'features': 'float64'
-                }
-            }
-
-            # 创建任务包装函数（简化版）
-            def task_wrapper(params):
-                result = self._evaluate_params(params, serializable_data, verbose)
-                processed_result = process_result(result)
-                return processed_result
-            print("✅ 并行任务已成功启动", flush=True)
-            # 执行并行任务并实时处理结果
-            with Parallel(n_jobs=n_jobs, verbose=5, timeout=3600) as parallel:
-                results = []
-                for result in parallel(delayed(task_wrapper)(params) for params in grid):
-                    results.append(result)
-            
-            # 过滤合格结果
-            qualified_results = [res for res in results if res['qualified']]
-            self._save_results(qualified_results)
-            
-            # 最终结果展示
-            self.dashboard.print_best_result(results)
-            
-            return sorted(qualified_results, key=lambda x: x['metrics']['sharpe_ratio'], reverse=True)
-        finally:
-            # 清理进度跟踪
-            self.dashboard.total_tasks = 0
-            self.dashboard.completed = 0
-            
+        # 执行并行任务并实时处理结果
+        with Parallel(n_jobs=n_jobs, verbose=5, timeout=3600) as parallel:
+            results = []
+            for result in parallel(delayed(task_wrapper)(
+                params, 
+                serializable_data,
+                self.optimization_config,
+                verbose,
+                self.shared_completed,
+                self.shared_best_score,
+                self.shared_lock,
+                total_combinations
+            ) for params in grid):
+                results.append(result)
+        
+        # 过滤合格结果
+        qualified_results = [res for res in results if res.get('qualified')]
+        self._save_results(qualified_results)
+        
+        # 最终结果展示
+        self.dashboard.print_best_result(results)
+        
         return sorted(qualified_results, key=lambda x: x['metrics']['sharpe_ratio'], reverse=True)
-
-    def _evaluate_params(self, params, data, verbose=False):
-        """执行单个参数组合的回测评估（子进程安全版本）"""
-        if verbose:
-            print(f"\n🔍 开始回测参数组合:", flush=True)
-            for k,v in params.items():
-                print(f"  {k}: {v}", flush=True)
-            
-        # 重建DataFrame数据（兼容原始DataFrame和序列化数据）
-        if isinstance(data, pd.DataFrame):
-            df = data
-        else:
-            try:
-                df = pd.DataFrame(
-                    data['features'],
-                    index=pd.to_datetime(data['index']),
-                    columns=data['columns']
-                )
-            except KeyError as e:
-                raise ValueError("Invalid data format. Expected serialized data with 'features' and 'index' fields") from e
-        if verbose:
-            print(f"✅ 数据重建完成，共{len(df)}条记录")
-        
-        # 创建可序列化的配置字典（避免传递复杂对象）
-        config_dict = {
-            'data_dir': 'ds_fee/market_data',
-            'output_dir': 'output',
-            **params
-        }
-        
-        # 创建引擎并注入动态参数
-        engine = BacktestEngine(config_dict)
-        # 更新配置参数并设置默认手续费率
-        actual_fee_rate = engine.actual_funding_rate or 0.0002  # 默认0.02%
-        config_dict.update({
-            'backtest': {
-                'start_date': engine.actual_start_date,
-                'end_date': engine.actual_end_date
-            },
-            'fee_rate': actual_fee_rate
-        })
-        # 重新创建引擎确保参数生效（使用合并后的配置）
-        engine = BacktestEngine({
-            **config_dict,
-            'fee_rate': actual_fee_rate  # 显式传递有效费率
-        })
-        engine.preprocessed_data = df  # 直接注入预处理数据
-        
-        try:
-            results = engine.run_backtest(config_dict, verbose=verbose, saveResults=False)
-        except Exception as e:
-            raise ValueError(f"⚠️ 回测失败: {str(e)}")
-        
-        # 确保risk_metrics存在  
-        if 'risk_metrics' not in results:
-            raise ValueError("⚠️ 回测结果缺少risk_metrics字段")
-        if verbose:
-            print("\n📊 回测结果详情:")
-            print(f"✅ 回测成功完成")
-            print(f"📅 回测期间: {config_dict['backtest']['start_date']} 至 {config_dict['backtest']['end_date']}")
-            print(f"💸 手续费率: {config_dict['fee_rate']:.4f}")
-            print(f"🔄 总交易次数: {results['risk_metrics']['total_trades']}")
-            print(f"⏱️ 平均持仓天数: {results['risk_metrics'].get('avg_holding_days', 0):.1f}")
-            print(f"💰 净利润: {results['risk_metrics']['net_profit']:.2f}")
-            print(f"📉 最大回撤: {results['risk_metrics']['max_drawdown']:.2%}")
-            print(f"🏆 年化收益率: {results['risk_metrics']['annualized_return']:.2%}")
-            print(f"⚖️ 夏普比率: {results['risk_metrics'].get('sharpe_ratio', 0):.2f}")
-        
-        # 处理可能缺失的metrics字段
-        metrics = results.get('risk_metrics')
-        
-        return {
-            'params': params.copy(),
-            'metrics': {
-                'annualized_return': metrics.get('annualized_return', -np.inf),
-                'max_drawdown': metrics.get('max_drawdown', 1.0),
-                'sharpe_ratio': metrics.get('sharpe_ratio', -np.inf),
-                'profit_factor': metrics.get('profit_factor', 0),
-                'win_rate': metrics.get('win_rate', 0),
-                'volatility': metrics.get('annualized_volatility', np.inf),
-                'avg_holding_days': metrics.get('avg_holding_days', 0),
-                'total_trades': metrics.get('total_trades', 0),
-                'net_profit': metrics.get('net_profit', -np.inf)
-            },
-            'qualified': self._is_qualified(metrics) if metrics else False,
-            'error': None
-        }
 
     def _save_results(self, results):
         """保存优化结果和历史记录"""
@@ -308,6 +254,18 @@ class ParameterOptimizer:
         log_path = f"{history_dir}/optimization_log.csv"
         pd.DataFrame([log_entry]).to_csv(log_path, mode='a', header=not os.path.exists(log_path))
 
+    def _evaluate_params(self, params, data):
+        """评估单个参数组合（类方法版本）"""
+        return evaluate_params(
+            params=params,
+            serializable_data={
+                'base_config': self.base_config,
+                'preprocessed_data': serialize_preprocessed_data(data)
+            },
+            optimization_config=self.optimization_config,
+            verbose=False
+        )
+
     def genetic_optimization(self, data, population_size=50, generations=20, verbose=False):
         """遗传算法优化器"""
         # 初始化种群
@@ -318,7 +276,7 @@ class ParameterOptimizer:
             # 过滤无效评估结果
             evaluated_pop = [res for res in 
                            (self._evaluate_params(ind, data) for ind in population)
-                           if res['metrics'] is not None]
+                           if res and res['metrics'] is not None]
             
             # 选择
             selected = self._selection(evaluated_pop)
@@ -339,11 +297,11 @@ class ParameterOptimizer:
         population = []
         for _ in range(size):
             individual = {
-                'spread_threshold': np.round(np.random.uniform(0.002, 0.006), 4),
-                'leverage': np.random.choice([2, 3, 4]),
-                'max_hold_seconds': np.random.choice([3600, 7200, 14400]),
-                'take_profit': np.round(np.random.uniform(0.004, 0.012), 4),
-                'stop_loss': np.round(np.random.uniform(0.003, 0.008), 4)
+                'spread_threshold': np.round(np.random.uniform(0.002, 0.006), 4),  # 价差范围0.2%-0.6%
+                'leverage': np.random.choice([2, 3, 4]),                          # 杠杆倍数选项
+                'max_hold_seconds': np.random.choice([3600, 7200, 14400]),         # 持仓时间1-4小时
+                'take_profit': np.random.choice(np.arange(0.004, 0.012, 0.001)),  # 止盈范围0.4%-1.2% 步长0.1%
+                'stop_loss': np.random.choice(np.arange(0.003, 0.008, 0.001))    # 止损范围0.3%-0.8% 步长0.1%
             }
             population.append(individual)
         return population
@@ -382,14 +340,10 @@ class ParameterOptimizer:
         
         # 统一数据序列化格式
         data = {
-            'features': raw_data.values.astype(np.float64).tolist(),
-            'index': raw_data.index.tz_localize(None).astype('datetime64[ns]').astype(np.int64).tolist(),
-            'columns': raw_data.columns.tolist(),
-            'dtypes': {
-                'index': 'datetime64[ns]',
-                'features': 'float64'
-            }
+            'base_config': self.base_config,
+            'preprocessed_data': serialize_preprocessed_data(raw_data)
         }
+        
         results = []
         for i in range(samples):
             # 生成随机参数
@@ -397,8 +351,8 @@ class ParameterOptimizer:
                 'spread_threshold': np.round(np.random.uniform(0.002, 0.006), 4),
                 'leverage': np.random.choice([2, 3, 4]),
                 'max_hold_seconds': np.random.choice([3600, 7200, 14400]),
-                'take_profit': np.round(np.random.uniform(0.004, 0.012), 4),
-                'stop_loss': np.round(np.random.uniform(0.003, 0.008), 4)
+                'take_profit': np.random.choice(np.arange(0.004, 0.012, 0.001)),  # 从步长0.1%的离散值中选择
+                'stop_loss': np.random.choice(np.arange(0.003, 0.008, 0.001))     # 从步长0.1%的离散值中选择
             }
             # 评估参数
             result = self._evaluate_params(params, data)
@@ -428,18 +382,12 @@ class ParameterOptimizer:
             # 持仓时间变异 (新选项)
             if np.random.rand() < 0.1:
                 mutated_params['max_hold_seconds'] = np.random.choice([3600, 7200, 14400])
-            # 止盈参数变异 (新范围0.004-0.012)
+            # 止盈参数变异 (从预定义步长中选择)
             if np.random.rand() < 0.1:
-                mutated_params['take_profit'] = np.clip(
-                    np.random.normal(params['take_profit'], 0.001),
-                    0.004, 0.012
-                ).round(4)
-            # 止损参数变异 (新范围0.003-0.008)
+                mutated_params['take_profit'] = np.random.choice(np.arange(0.004, 0.012, 0.001))
+            # 止损参数变异 (从预定义步长中选择)
             if np.random.rand() < 0.1:
-                mutated_params['stop_loss'] = np.clip(
-                    np.random.normal(params['stop_loss'], 0.001),
-                    0.003, 0.008
-                ).round(4)
+                mutated_params['stop_loss'] = np.random.choice(np.arange(0.003, 0.008, 0.001))
             mutated.append(mutated_params)
         return mutated
 
@@ -484,7 +432,7 @@ class ParameterOptimizer:
 if __name__ == "__main__":
     import argparse
     import json
-    from .config import load_base_config
+    from ds_fee.config import load_base_config
     
     # 命令行参数解析
     parser = argparse.ArgumentParser(description='量化策略参数优化执行器', 
@@ -501,23 +449,18 @@ if __name__ == "__main__":
 
     # 初始化优化器配置
     base_config = load_base_config()
-    param_space = {
-        'spread_threshold': np.round(np.linspace(0.002, 0.006, 5), 4),    # 优化价差范围0.2%-0.6%
-        'leverage': [2, 3, 4],                     # 杠杆倍数优化选项
-        'max_hold_seconds': [3600, 7200, 14400],   # 持仓时间1-4小时
-        'take_profit': np.round(np.linspace(0.004, 0.012, 4), 4),  # 止盈0.4%-1.2%
-        'stop_loss': np.round(np.linspace(0.003, 0.008, 4), 4),     # 止损0.3%-0.8%
-        'min_funding_rate': np.round(np.linspace(0.0005, 0.002, 4), 4),  # 最低资金费率0.05%-0.2%
-        'risk_per_trade': [0.01, 0.02, 0.03]  # 单笔交易风险1%-3%
+    param_ranges = {
+        'spread_threshold': np.arange(0.002, 0.006, 0.0005),  # 调整到更合理的价差范围
+        'leverage': [2, 3, 4],
+        'max_hold_seconds': [3600, 7200, 14400],  # 1-4小时更合理的持仓时间
+        'take_profit': np.arange(0.004, 0.012, 0.001),  # 新增止盈参数
+        'stop_loss': np.arange(0.003, 0.008, 0.001)     # 新增止损参数
     }
-    optimizer = ParameterOptimizer(base_config, param_space)
+    optimizer = ParameterOptimizer(base_config, param_ranges)  # 修正变量名错误
 
     try:
-        # 使用BacktestEngine加载预处理数据
-        # 通过配置初始化引擎
-        from .config import load_base_config
-        config = load_base_config()
-        engine = BacktestEngine(config)
+        # 使用已加载的基础配置初始化引擎
+        engine = BacktestEngine(base_config)
         engine.preprocess_data()
         data = engine.preprocessed_data
         

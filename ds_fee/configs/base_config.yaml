@@ -1,9 +1,18 @@
 # 最小必要基础配置
 symbol: "BTC/USDT"
-initial_balance: 100000.0
+initial_balance: 1500.0  # 初始资金配置（单位：USDT）
 
 # 数据存储目录配置
 data_dir: "ds_fee/market_data/"
+
+# 交易手续费配置（2025年3月最新费率）
+fees:
+  spot:  # 现货交易手续费
+    maker: 0.001   # 挂单手续费率 0.1%
+    taker: 0.001   # 吃单手续费率 0.1%
+  future:  # 合约交易手续费
+    maker: 0.0002  # 挂单开仓手续费率 0.02%
+    taker: 0.0004  # 吃单平仓手续费率 0.05%
 
 # 以下参数将由引擎自动设置
 # backtest时间范围根据实际数据自动确定 

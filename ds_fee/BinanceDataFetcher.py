@@ -45,7 +45,8 @@ CONFIG = {
 
 # ==================== 数据获取器（优化版）====================
 class BinanceDataFetcher:
-    def __init__(self):
+    def __init__(self, verbose=True):
+        self.verbose = verbose
         self._init_exchanges()
         # 添加时区配置
         self.utc_tz = pytz.UTC
@@ -90,9 +91,11 @@ class BinanceDataFetcher:
                     headers=CONFIG['exchange']['headers'],
                     timeout=10
                 )
-                print(f"代理验证 {url} 状态码: {response.status_code}")
+                if self.verbose:
+                    print(f"代理验证 {url} 状态码: {response.status_code}")
             except Exception as e:
-                print(f"代理验证失败: {str(e)}")
+                if self.verbose:
+                    print(f"代理验证失败: {str(e)}")
                 raise ConnectionError("代理服务器不可用")
 
     def _get_daily_files(self, start_date, end_date):
@@ -142,14 +145,16 @@ class BinanceDataFetcher:
 
         for date_file in date_files:
             if not self._file_needs_download(date_file, market_type):
-                print(f"跳过已存在文件: {date_file}")
+                if self.verbose:
+                    print(f"跳过已存在文件: {date_file}")
                 continue
 
             day_str = date_file.replace('.csv', '')
             day_start = int(pd.Timestamp(day_str).timestamp() * 1000)
             day_end = int((pd.Timestamp(day_str) + pd.Timedelta(days=1)).timestamp() * 1000)
 
-            print(f"\n开始获取{market_type}市场数据（日期：{day_str}）")
+            if self.verbose:
+                print(f"\n开始获取{market_type}市场数据（日期：{day_str}）")
 
             daily_data = []
             since = day_start
@@ -180,7 +185,8 @@ class BinanceDataFetcher:
                         break
 
                 except Exception as e:
-                    print(f"分页获取失败: {str(e)}")
+                    if self.verbose:
+                        print(f"分页获取失败: {str(e)}")
                     break
 
             if daily_data:
@@ -223,7 +229,8 @@ class BinanceDataFetcher:
         # 保存数据
         if not df.empty:
             df.to_csv(filepath, index=False)
-            print(f"保存 {len(df)} 条{market_type}数据到 {filepath}")
+            if self.verbose:
+                print(f"保存 {len(df)} 条{market_type}数据到 {filepath}")
 
     def _load_all_data(self, market_type):
         """根据市场类型加载对应目录数据"""
@@ -255,7 +262,8 @@ class BinanceDataFetcher:
                 df['market_type'] = market_type
                 dfs.append(df)
             except Exception as e:
-                print(f"加载文件 {file} 失败: {str(e)}")
+                if self.verbose:
+                    print(f"加载文件 {file} 失败: {str(e)}")
                 continue
 
         if not dfs:
@@ -311,20 +319,22 @@ class BinanceDataFetcher:
         """增加调试信息的重试机制"""
         for i in range(CONFIG['retries']):
             try:
-                # 打印请求信息用于调试
-                print(f"Attempting {func.__name__} at {self.future_ex.urls['api']['public']}")
+
                 return func(*args, **kwargs)
             except ccxt.AuthenticationError as e:
                 print(f"认证错误: {str(e)}")
                 raise
             except (ccxt.NetworkError, ccxt.RequestTimeout) as e:
-                print(f"网络错误（尝试 {i + 1}/{CONFIG['retries']}）: {str(e)}")
+                if self.verbose:
+                    print(f"网络错误（尝试 {i + 1}/{CONFIG['retries']}）: {str(e)}")
                 if i < CONFIG['retries'] - 1:
                     sleep_time = CONFIG['retry_delay'] * (2 ** i)
-                    print(f"等待 {sleep_time} 秒后重试...")
+                    if self.verbose:
+                        print(f"等待 {sleep_time} 秒后重试...")
                     time.sleep(sleep_time)
             except ccxt.ExchangeError as e:
-                print(f"交易所错误: {str(e)}")
+                if self.verbose:
+                    print(f"交易所错误: {str(e)}")
                 if 'Invalid symbol' in str(e):
                     raise ValueError(f"交易对错误: {CONFIG['symbol']}")
                 raise
@@ -362,7 +372,8 @@ class BinanceDataFetcher:
 
                 # 类型验证和转换
                 if not isinstance(response, list):
-                    print(f"异常响应格式: {type(response)}")
+                    if self.verbose:
+                        print(f"异常响应格式: {type(response)}")
                     break
 
                 # 处理每条记录
@@ -379,7 +390,8 @@ class BinanceDataFetcher:
                                 'fundingRate': funding_rate
                             })
                     except (KeyError, ValueError) as e:
-                        print(f"数据解析异常: {str(e)} | 数据: {item}")
+                        if self.verbose:
+                            print(f"数据解析异常: {str(e)} | 数据: {item}")
 
                 # 更新分页参数
                 if response:
@@ -398,33 +410,13 @@ class BinanceDataFetcher:
             return pd.DataFrame()
 
         except Exception as e:
-            print(f"资金费率获取异常: {str(e)}")
+            if self.verbose:
+                print(f"资金费率获取异常: {str(e)}")
             return pd.DataFrame()
 
-    # def fetch_funding_rates(self):
-    #     """独立获取所有资金费率"""
-    #     end_time = datetime.now(self.utc_tz)
-    #     start_time = end_time - timedelta(days=CONFIG['days'])
-    #
-    #     date_files = self._get_daily_files(start_time, end_time)
-    #     all_funding = []
-    #
-    #     for date_file in date_files:
-    #         day_str = date_file.replace('.csv', '')
-    #         day = pd.Timestamp(day_str, tz='UTC')
-    #
-    #         print(f"\n开始获取资金费率数据（日期：{day_str}）")
-    #         funding_df = self._get_daily_funding_rates(day)
-    #
-    #         if not funding_df.empty:
-    #             all_funding.append(funding_df)
-    #
-    #     return pd.concat(all_funding).sort_values('timestamp').reset_index(drop=True)
-
 # ==================== 优化后的数据处理 ====================
-def process_and_save_data(spot_df, future_df):
-    """
-    合并现货和期货数据，并从期货数据中提取资金费率
+def process_and_save_data(spot_df, future_df, verbose=True):
+    """合并现货和期货数据，并从期货数据中提取资金费率
     返回包含以下字段的DataFrame:
     - timestamp (UTC时区)
     - spot_price
@@ -450,7 +442,8 @@ def process_and_save_data(spot_df, future_df):
         ).values
     else:
         merged_df['funding_rate'] = None
-        print("警告：期货数据中未找到资金费率字段")
+        if verbose:
+            print("警告：期货数据中未找到资金费率字段")
 
     # 数据清理
     final_df = merged_df[[
@@ -469,14 +462,16 @@ def process_and_save_data(spot_df, future_df):
     # 保存最终数据
     final_path = os.path.join(CONFIG['data_dir'], 'merged_dataset.csv')
     final_df.to_csv(final_path, index=False)
-    print(f"数据集已保存至: {final_path}")
+    if verbose:
+        print(f"数据集已保存至: {final_path}")
 
     return final_df
 
 # ==================== 主程序 ====================
 if __name__ == "__main__":
-    print("=== 启动数据获取程序 ===")
-    fetcher = BinanceDataFetcher()
+    if verbose:
+        print("=== 启动数据获取程序 ===")
+    fetcher = BinanceDataFetcher(verbose=True)
 
     try:
         # 获取数据
@@ -484,19 +479,21 @@ if __name__ == "__main__":
         future = fetcher.fetch_ohlcv('future')
 
         # 处理数据
-        df = process_and_save_data(spot, future)
+        df = process_and_save_data(spot, future, verbose=True)
 
         # 数据验证
-        print("\n数据质量报告:")
-        print(f"时间范围: {df['timestamp'].min()} ~ {df['timestamp'].max()}")
-        print(f"总记录数: {len(df)}")
-        print(f"缺失值统计:\n{df.isnull().sum()}")
-        print("\n前5条记录:")
-        print(df.head())
-        print("\n最后5条记录:")
-        print(df.tail())
+        if verbose:
+            print("\n数据质量报告:")
+            print(f"时间范围: {df['timestamp'].min()} ~ {df['timestamp'].max()}")
+            print(f"总记录数: {len(df)}")
+            print(f"缺失值统计:\n{df.isnull().sum()}")
+            print("\n前5条记录:")
+            print(df.head())
+            print("\n最后5条记录:")
+            print(df.tail())
 
     except Exception as e:
-        print(f"\n程序运行失败: {str(e)}")
-        raise e
+        if verbose:
+            print(f"\n程序运行失败: {str(e)}")
+        raise
         exit(1)
