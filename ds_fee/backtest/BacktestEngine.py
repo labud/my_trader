@@ -1,3 +1,6 @@
+import sys
+from pathlib import Path
+from ds_fee.config import load_base_config
 from ds_fee.backtest.data_processor import DataProcessor
 from ds_fee.backtest.visualizer import ResultVisualizer
 from ds_fee.backtest.backtest_core import BacktestCore
@@ -34,10 +37,7 @@ if __name__ == "__main__":
     # 保留原有主函数逻辑
     def main():
         try:
-            import sys
-            from pathlib import Path
             sys.path.append(str(Path(__file__).parent.parent.parent))
-            from ds_fee.config import load_base_config
             config = load_base_config()
             engine = BacktestEngine(config)
             

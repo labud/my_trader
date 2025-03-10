@@ -3,6 +3,7 @@ import numpy as np
 from typing import Dict, Any
 from .data_processor import DataProcessor
 from ds_fee.strategy.funding_arbitrage import should_open_position, should_close_position
+from ds_fee.utils.time_series import get_next_funding_time
 
 class BacktestCore:
     def __init__(self, config, data_processor):
@@ -10,15 +11,14 @@ class BacktestCore:
         self.data_processor = data_processor
         self.processor = data_processor  # 使用传入的处理器实例
         self.initial_balance = getattr(config, 'initial_balance', 100000.0)
-        self.preprocessed_data = None
 
     def _calculate_atr(self, window):
         """计算平均真实波动范围(Average True Range, ATR)"""
-        if self.preprocessed_data is None:
+        if self.processor.preprocessed_data is None:
             raise ValueError("需要先预处理数据")
 
         # 创建数据副本避免修改原始数据
-        df = self.preprocessed_data.loc[:, ['high_spot', 'low_spot', 'close_spot']]
+        df = self.processor.preprocessed_data.loc[:, ['high_spot', 'low_spot', 'close_spot']]
         
         # 提取计算ATR所需的价格数据
         high = df['high_spot']      # 当日最高价
@@ -93,7 +93,7 @@ class BacktestCore:
         """
         if self.processor.preprocessed_data is None:
             self.processor.preprocess_data(verbose=verbose)
-        self.preprocessed_data = self.processor.preprocessed_data
+        preprocessed_data = self.processor.preprocessed_data
 
         # 初始化资产组合（关键数据结构）
         portfolio = {
@@ -108,7 +108,7 @@ class BacktestCore:
         atrs = self._calculate_atr(window=atr_window)  # 使用配置的ATR周期
 
         # 核心交易逻辑（逐笔数据回放）
-        for idx, row in self.preprocessed_data.iterrows():
+        for idx, row in preprocessed_data.iterrows():
             # 计算当前期现价差（期货价格 - 现货价格）
             # 正值表示期货溢价，负值表示期货折价
             current_spread = row['price_spread']  # 单位：USDT
@@ -118,23 +118,15 @@ class BacktestCore:
             expected_profit = abs(current_spread) - params['spread_threshold']  # 单位：USDT
             
             # 计算价差趋势（使用过去60分钟的价差数据，增加判断周期）
-            current_idx = self.preprocessed_data.index.get_loc(idx)
+            current_idx = preprocessed_data.index.get_loc(idx)
             start_idx = max(0, current_idx - 60)
-            spread_history = self.preprocessed_data['price_spread'].iloc[start_idx:current_idx+1]
+            spread_history = preprocessed_data['price_spread'].iloc[start_idx:current_idx+1]
             spread_trend = spread_history.diff().mean()  # 正值表示价差扩大趋势，负值表示价差收窄趋势
             spread_volatility = spread_history.std()  # 计算价差波动率
             
             # 计算距离下一个资金费率结算时间的分钟数
             current_time = row.name
-            next_funding_time = pd.Timestamp(current_time.date(), tz=current_time.tz)
-            # 根据当前时间确定下一个结算时间点（UTC 0:00, 8:00, 16:00）
-            if current_time.hour < 8:
-                next_funding_time += pd.Timedelta(hours=8)
-            elif current_time.hour < 16:
-                next_funding_time += pd.Timedelta(hours=16)
-            else:
-                next_funding_time += pd.Timedelta(days=1)
-            minutes_to_funding = (next_funding_time - current_time).total_seconds() / 60
+            next_funding_time, minutes_to_funding = get_next_funding_time(current_time)
             
             # 判断当前是否处于高风险时段（UTC 16:00-24:00）
             is_high_risk_period = 16 <= current_time.hour < 24
@@ -210,7 +202,7 @@ class BacktestCore:
                         start_time=entry_trade['timestamp'],
                         end_time=row.name,
                         position=portfolio['position'],
-                        funding_rates=self.preprocessed_data['funding_rate']
+                        funding_rates=preprocessed_data['funding_rate']
                     )
                     
                     # 计算价差收益（期现价差变化带来的收益）
@@ -359,8 +351,8 @@ class BacktestCore:
         
         #====== 时间维度分析 ======#
         # 计算回测周期总天数
-        start_time = self.preprocessed_data.index.min().to_pydatetime()
-        end_time = self.preprocessed_data.index.max().to_pydatetime()
+        start_time = self.data_processor.preprocessed_data.index.min().to_pydatetime()
+        end_time = self.data_processor.preprocessed_data.index.max().to_pydatetime()
         total_days = (end_time - start_time).days + 1  # 含当天
         
         #====== 收益指标 ======#

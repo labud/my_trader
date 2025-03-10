@@ -4,7 +4,33 @@ from pathlib import Path
 
 class Config:
     """基础配置类"""
-    pass
+    def get(self, key, default=None):
+        """获取配置项，支持默认值
+        
+        Args:
+            key: 配置项键名
+            default: 默认值，当配置项不存在时返回
+            
+        Returns:
+            配置项值或默认值
+        """
+        return getattr(self, key, default)
+        
+    def to_dict(self):
+        """将配置对象转换为字典格式
+        
+        Returns:
+            dict: 配置对象的字典表示
+        """
+        return {key: value for key, value in self.__dict__.items()}
+        
+    def __iter__(self):
+        """使Config对象可迭代，支持dict()转换
+        
+        Returns:
+            iterator: 配置项的迭代器
+        """
+        return iter(self.to_dict().items())
 
 def load_base_config(config_path: str = None) -> Config:
     """加载基础配置文件
