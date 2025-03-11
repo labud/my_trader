@@ -3,6 +3,29 @@ import yaml
 from pathlib import Path
 
 class Config:
+    def __init__(self, **kwargs):
+        # 过滤掉不可序列化的属性
+        safe_kwargs = {}
+        for key, value in kwargs.items():
+            try:
+                import pickle
+                pickle.dumps(value)
+                safe_kwargs[key] = value
+            except Exception as e:
+                print(f"警告: 属性 {key} 不可序列化")
+                print(f"类型: {type(value)}")
+                print(f"错误: {str(e)}")
+                print("------------------------")
+        self.__dict__.update(safe_kwargs)
+    
+    def __getstate__(self):
+        # 确保对象可以被序列化
+        return self.__dict__
+    
+    def __setstate__(self, state):
+        # 从序列化状态恢复
+        self.__dict__.update(state)
+
     """基础配置类"""
     def get(self, key, default=None):
         """获取配置项，支持默认值
@@ -42,7 +65,7 @@ def load_base_config(config_path: str = None) -> Config:
         Config: 配置对象
     """
     if not config_path:
-        config_path = os.path.join(Path(__file__).parent, "configs/base_config.yaml")
+        config_path = os.path.join(Path(__file__).parent.parent, "conf/base_config.yaml")
     
     try:
         with open(config_path, 'r') as f:

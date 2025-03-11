@@ -1,6 +1,7 @@
 import numpy as np
 from .base import BaseOptimizer
 from .params import OptimizationParams
+from .shared_state import SharedState
 
 class GeneticOptimizer(BaseOptimizer):
     def validate_params(self, params: OptimizationParams) -> None:
@@ -9,7 +10,7 @@ class GeneticOptimizer(BaseOptimizer):
         if params.generations is not None and params.generations <= 0:
             raise ValueError("generations必须大于0")
 
-    def optimize(self, data, params: OptimizationParams):
+    def optimize(self, data, params: OptimizationParams, shared_state: SharedState):
         # 验证参数
         self.validate_params(params)
         

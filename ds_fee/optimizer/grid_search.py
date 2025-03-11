@@ -1,14 +1,15 @@
-from sklearn.model_selection import ParameterGrid
 from joblib import Parallel, delayed
+from sklearn.model_selection import ParameterGrid
 from .base import BaseOptimizer, evaluate_params
 from .params import OptimizationParams
+from .shared_state import SharedState
 
 class GridSearchOptimizer(BaseOptimizer):
     def validate_params(self, params: OptimizationParams) -> None:
         if params.n_jobs is not None and params.n_jobs == 0:
             raise ValueError("n_jobs不能为0")
 
-    def optimize(self, data, params: OptimizationParams):
+    def optimize(self, data, params: OptimizationParams, shared_state: SharedState):
         # 验证参数
         self.validate_params(params)
         
@@ -21,9 +22,15 @@ class GridSearchOptimizer(BaseOptimizer):
         param_grid = list(ParameterGrid(param_ranges))
         print(f"\n📊 开始网格搜索，参数组合数: {len(param_grid)}")
         
-        # 并行执行回测
+        # 并行执行回测，传递共享状态管理器实例
         results = Parallel(n_jobs=params.n_jobs, verbose=50)(
-            delayed(evaluate_params)(param, data, self.base_config, self.dashboard, params.verbose)
+            delayed(evaluate_params)(
+                param, 
+                data, 
+                self.base_config, 
+                shared_state,  # 传递共享状态管理器实例
+                params.verbose
+            )
             for param in param_grid
         )
         

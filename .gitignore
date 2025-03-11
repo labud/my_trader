@@ -82,3 +82,6 @@ ipython_config.py
 
 market_data/
 output/
+
+# Optimization results
+optimization_results/

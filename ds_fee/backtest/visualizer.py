@@ -11,89 +11,73 @@ class ResultVisualizer:
         self.output_dir = getattr(config, 'output_dir', 'output')
         os.makedirs(self.output_dir, exist_ok=True)
 
-    def visualize_results(self, results, preprocessed_data, save_to_file=True, verbose = True):
-        """可视化回测结果"""
-        # 统一时区校验
+    def visualize_results(self, results, preprocessed_data, save_to_file=True, verbose=True):
         def validate_timezone(df, name):
-            """统一时区校验方法"""
             if not isinstance(df.index, pd.DatetimeIndex):
                 raise ValueError(f"{name}索引不是时间类型")
             if df.index.tz is None:
                 raise ValueError(f"{name}时间索引缺少时区信息")
             return df.index.tz
 
-        # 校验原始数据时区
         base_tz = validate_timezone(preprocessed_data, "preprocessed_data")
-        
-        # 校验结果数据时区
+
         results_df = pd.DataFrame(results['equity_curve']).set_index('timestamp')
         results_tz = validate_timezone(results_df, "results")
         if base_tz != results_tz:
             raise ValueError(f"时区不一致: preprocessed_data({base_tz}) vs results({results_tz})")
-            
+
         plt.rcParams['font.sans-serif'] = ['PingFang SC', 'Songti SC', 'STHeiti', 'Microsoft YaHei']
         plt.rcParams['axes.unicode_minus'] = False
         plt.rcParams['figure.figsize'] = (14, 8)
         plt.rcParams['figure.dpi'] = 100
 
-        # 可视化逻辑（保持原有代码结构）
-        # 启用快速绘图模式
         plt.ioff()
         plt.style.use('fast')
-        
-        # 性能优化增强版
+
         import time
         start_time = time.time()
-        
+
         # 使用更高效的agg后端
         plt.switch_backend('agg')
-            
-        # 优化时区处理和采样间隔（30分钟）
+
         equity_df = pd.DataFrame(results['equity_curve'])
         equity_df['timestamp'] = pd.to_datetime(equity_df['timestamp']).dt.tz_convert(base_tz)
-        
-        # 最终优化：按日采样
+
         equity_df = (equity_df.set_index('timestamp')
-                     .resample('D').last()  # 改为每日采样
-                     .ffill())
-        
+                    .resample('D').last()  # 改为每日采样
+                    .ffill())
+
         # 保持preprocessed_data原始时区
         preprocessed_data = (preprocessed_data
-                             .resample('D').last()
-                             .ffill())
-        
-        # 最终优化合并字段
+                           .resample('D').last()
+                           .ffill())
+
         merged_df = pd.merge_asof(
             preprocessed_data[['close_spot']].reset_index(),  # 仅保留必要字段
             equity_df[['value', 'position']].reset_index(),
             on='timestamp',
             direction='nearest'
         ).set_index('timestamp').astype({'position': 'float32'})  # 优化内存
-        
-        # 添加必要的计算列并验证数据
+
         merged_df['position'] = merged_df['position'].fillna(0)
-        
-        # 验证时间序列是否有序
+
         is_sorted = (merged_df.index == merged_df.index.sort_values()).all()
         if not is_sorted:
             print("警告: 数据时间序列无序，正在进行排序...")
             merged_df = merged_df.sort_index()
-        
-        # 创建组合图表（资金曲线、价格曲线和仓位） 
+
         plt.figure(figsize=(14, 18))  # 增加总高度适应三个子图
-        
-        # 资金曲线子图（占40%高度）
+
         ax1 = plt.subplot(311)
         plt.subplots_adjust(hspace=0.3)  # 增加子图间距
-        # 打印交易数据信息
+
         if 'trades' in results and results['trades']:
             trades_df = pd.DataFrame(results['trades'])
             if verbose:
                 print(f"交易数据概览:\n{trades_df.describe()}\n")
                 print(f"前5笔交易记录:\n{trades_df.head()}\n")
-        ax1.plot(merged_df.index, merged_df['value'], label='资金曲线', linewidth=1.5, color='#1f77b4')
-        
-        # 添加买卖点标记
+            ax1.plot(merged_df.index, merged_df['value'], label='资金曲线', linewidth=1.5, color='#1f77b4')
+
         if 'trades' in results and results['trades']:
             trades_df = pd.DataFrame(results['trades'])
             if verbose and not trades_df.empty:
@@ -101,12 +85,10 @@ class ResultVisualizer:
             # 使用timestamp作为开仓时间，exit_time作为平仓时间
             buy_dates = trades_df['timestamp']  # 开仓时间点
             sell_dates = trades_df['exit_time']  # 平仓时间点
-            
-            # 打印交易时间点信息
+
             if verbose:
                 print(f"开仓时间点数量: {len(buy_dates)}")
                 print(f"平仓时间点数量: {len(sell_dates)}")
-                print(f"时间范围: {buy_dates.min()} 至 {sell_dates.max()}")
 
                 print(f"买入交易数: {len(buy_dates)}, 卖出交易数: {len(sell_dates)}")
             

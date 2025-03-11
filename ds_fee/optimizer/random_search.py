@@ -1,13 +1,19 @@
 import numpy as np
 from .base import BaseOptimizer, evaluate_params
 from .params import OptimizationParams
+from .shared_state import SharedState
 
 class RandomSearchOptimizer(BaseOptimizer):
     def validate_params(self, params: OptimizationParams) -> None:
         if params.samples is not None and params.samples <= 0:
             raise ValueError("samples必须大于0")
 
-    def optimize(self, data, params: OptimizationParams):
+    def optimize(self, data, params: OptimizationParams, shared_state: SharedState):
+        # 确保共享状态管理器已初始化
+        if not self.shared_state_manager:
+            from .shared_state import SharedStateManager
+            self.shared_state_manager = SharedStateManager.get_instance()
+
         # 验证参数
         self.validate_params(params)
         
@@ -32,7 +38,7 @@ class RandomSearchOptimizer(BaseOptimizer):
                     )
             
             # 评估参数
-            result = evaluate_params(params_dict, data, self.base_config, self.dashboard, params.verbose)
+            result = evaluate_params(params_dict, data, self.base_config, self.dashboard, self.shared_state_manager, params.verbose)
             results.append(result)
             
             # 更新进度

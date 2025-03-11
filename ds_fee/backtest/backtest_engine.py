@@ -1,6 +1,6 @@
 import sys
 from pathlib import Path
-from ds_fee.config import load_base_config
+from ds_fee.utils.config import load_base_config
 from ds_fee.backtest.data_processor import DataProcessor
 from ds_fee.backtest.visualizer import ResultVisualizer
 from ds_fee.backtest.backtest_core import BacktestCore

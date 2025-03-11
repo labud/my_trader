@@ -4,41 +4,92 @@ from abc import ABC, abstractmethod
 from datetime import datetime
 import os
 import json
-from ds_fee.backtest.BacktestEngine import BacktestEngine
+import multiprocessing
+from ds_fee.backtest.backtest_engine import BacktestEngine
 from .params import OptimizationParams
+from .shared_state import SharedState, get_best_result, update_best_result, increment_counter
 
 import argparse
 
-class OptimizationDashboard:
-    def print_best_result(self, results):
-        # 过滤无效结果
-        valid_results = [r for r in results if r.get('metrics')]
+class BaseOptimizer(ABC):
+    @staticmethod
+    def parse_args():
+        parser = argparse.ArgumentParser(description='参数优化器')
+        parser.add_argument('--optimizer', type=str, choices=['genetic', 'random', 'grid'], default='grid',
+                          help='优化方法: genetic(遗传算法), random(随机搜索), grid(网格搜索)')
+        parser.add_argument('--population-size', type=int, default=50, help='遗传算法种群大小')
+        parser.add_argument('--generations', type=int, default=20, help='遗传算法迭代次数')
+        parser.add_argument('--samples', type=int, default=500, help='随机搜索采样数')
+        parser.add_argument('--n-jobs', type=int, default=4, help='网格搜索并行数')
+        parser.add_argument('--verbose', action='store_true', help='是否显示详细信息')
+        return parser.parse_args()
+
+    def __init__(self, base_config):
+        self.base_config = base_config
+
+    @abstractmethod
+    def validate_params(self, params) -> None:
+        """验证优化器参数
         
-        if valid_results:
-            # 始终显示全局最优夏普组合
-            best_sharpe = max(valid_results, 
-                            key=lambda x: x['metrics'].get('sharpe_ratio', -np.inf))
-            print("\n📈 当前最优夏普组合:")
-            for k, v in best_sharpe['params'].items():
-                print(f"  ▸ {k}: {v}")
-            print(f"  夏普比率: {best_sharpe['metrics']['sharpe_ratio']:.2f}")
-            print(f"  年化收益: {best_sharpe['metrics']['annualized_return']:.2%}")
-            print(f"  最大回撤: {best_sharpe['metrics']['max_drawdown']:.2%}")
-            print(f"  是否合格: {'✅' if best_sharpe['qualified'] else '❌'}")
+        Args:
+            params: OptimizationParams实例，包含优化器参数
+            
+        Raises:
+            ValueError: 当参数验证失败时抛出
+        """
+        pass
 
-            # 显示全局收益最高的组合（即使不合格）
-            best_profit = max(valid_results, 
-                            key=lambda x: x['metrics'].get('annualized_return', -np.inf))
-            print("\n🏆 全局最高收益组合:")
-            for k, v in best_profit['params'].items():
-                print(f"  ▸ {k}: {v}")
-            print(f"  年化收益: {best_profit['metrics']['annualized_return']:.2%}")
-            print(f"  夏普比率: {best_profit['metrics'].get('sharpe_ratio', 0):.2f}")
-            print(f"  最大回撤: {best_profit['metrics']['max_drawdown']:.2%}")
-            print(f"  是否合格: {'✅' if best_profit['qualified'] else '❌'}")
+    @abstractmethod
+    def optimize(self, data, params, shared_state):
+        """执行优化过程
+        
+        Args:
+            data: pd.DataFrame, 预处理后的市场数据
+            params: OptimizationParams实例，包含优化器参数
+            shared_state: SharedState, 用于并行进程同步信息
+            
+        Returns:
+            List[Dict]: 优化结果列表，按性能指标排序
+        """
+        pass
 
-def evaluate_params(params, data, base_config, dashboard, verbose=False):
+    def save_full_report(self, results, output_dir):
+        """保存完整优化报告"""
+        os.makedirs(output_dir, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+        # 保存CSV结果
+        df = pd.DataFrame([{
+            **res['params'],
+            **res['metrics'],
+            'qualified': res['qualified']
+        } for res in results])
+        csv_path = f"{output_dir}/optimization_report_{timestamp}.csv"
+        df.to_csv(csv_path, index=False)
+        
+        # 保存元数据
+        # 只处理合格结果
+        qualified = [res for res in results if res['qualified']]
+        meta = {
+            "optimization_date": timestamp,
+            "total_combinations": len(results),
+            "qualified_count": len(qualified),
+            "best_sharpe": max((res['metrics']['sharpe_ratio'] for res in qualified), default=None)
+        } if qualified else {
+            "optimization_date": timestamp,
+            "total_combinations": len(results),
+            "qualified_count": 0,
+            "best_sharpe": None
+        }
+        json_path = f"{output_dir}/metadata_{timestamp}.json"
+        with open(json_path, 'w') as f:
+            json.dump(meta, f, indent=2)
+
+def evaluate_params(params, data, base_config, shared_state, verbose=False):
     """执行单个参数组合的回测评估"""
+    if not shared_state:
+        raise ValueError("必须提供共享状态")
+
     if verbose:
         print(f"\n🔍 开始回测参数组合:", flush=True)
         for k,v in params.items():
@@ -99,6 +150,21 @@ def evaluate_params(params, data, base_config, dashboard, verbose=False):
             result['metrics']['win_rate'] >= min_win_rate
         )
         
+        # 更新全局计数器和最优结果
+        current_count = increment_counter(shared_state)
+        is_better = update_best_result(shared_state, result)
+        
+        # 每10组参数或发现更优结果时打印进度
+        if current_count % 10 == 0 or is_better:
+            best_result = get_best_result(shared_state)
+            print(f"\n📊 已评估参数组数: {current_count}")
+            print("当前最优结果:")
+            print(f"  夏普比率: {best_result['sharpe_ratio']:.2f}")
+            print(f"  年化收益: {best_result['annualized_return']:.2%}")
+            print("最优参数:")
+            for k, v in best_result['params'].items():
+                print(f"  {k}: {v}")
+        
         return result
             
     except Exception as e:
@@ -110,81 +176,29 @@ def evaluate_params(params, data, base_config, dashboard, verbose=False):
         print(f"错误堆栈:\n{error_stack}")
         return {'params': params, 'error': str(e), 'error_stack': error_stack}
 
-class BaseOptimizer(ABC):
-    @staticmethod
-    def parse_args():
-        parser = argparse.ArgumentParser(description='参数优化器')
-        parser.add_argument('--optimizer', type=str, choices=['genetic', 'random', 'grid'], default='grid',
-                          help='优化方法: genetic(遗传算法), random(随机搜索), grid(网格搜索)')
-        parser.add_argument('--population-size', type=int, default=50, help='遗传算法种群大小')
-        parser.add_argument('--generations', type=int, default=20, help='遗传算法迭代次数')
-        parser.add_argument('--samples', type=int, default=500, help='随机搜索采样数')
-        parser.add_argument('--n-jobs', type=int, default=4, help='网格搜索并行数')
-        parser.add_argument('--verbose', action='store_true', help='是否显示详细信息')
-        return parser.parse_args()
+def print_best_result(results):
+    # 过滤无效结果
+    valid_results = [r for r in results if r.get('metrics')]
 
-    def __init__(self, base_config):
-        self.base_config = base_config
-        self.dashboard = OptimizationDashboard()
+    if valid_results:
+        # 始终显示全局最优夏普组合
+        best_sharpe = max(valid_results, 
+                        key=lambda x: x['metrics'].get('sharpe_ratio', -np.inf))
+        print("\n📈 当前最优夏普组合:")
+        for k, v in best_sharpe['params'].items():
+            print(f"  ▸ {k}: {v}")
+        print(f"  夏普比率: {best_sharpe['metrics']['sharpe_ratio']:.2f}")
+        print(f"  年化收益: {best_sharpe['metrics']['annualized_return']:.2%}")
+        print(f"  最大回撤: {best_sharpe['metrics']['max_drawdown']:.2%}")
+        print(f"  是否合格: {'✅' if best_sharpe['qualified'] else '❌'}")
 
-    @abstractmethod
-    def validate_params(self, params) -> None:
-        """验证优化器参数
-        
-        Args:
-            params: OptimizationParams实例，包含优化器参数
-            
-        Raises:
-            ValueError: 当参数验证失败时抛出
-        """
-        pass
-
-    @abstractmethod
-    def optimize(self, data, params):
-        """优化方法的抽象接口，需要被具体的优化器实现
-        
-        Args:
-            data: 预处理后的数据，DataFrame格式
-            params: 优化器参数配置实例
-        
-        Returns:
-            list: 排序后的优化结果列表，每个元素为字典格式：
-                {
-                    'params': 参数配置字典,
-                    'metrics': 评估指标字典,
-                    'qualified': 是否满足风控要求的布尔值
-                }
-        """
-        pass
-
-    def save_full_report(self, results, output_dir):
-        """保存完整优化报告"""
-        os.makedirs(output_dir, exist_ok=True)
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        
-        # 保存CSV结果
-        df = pd.DataFrame([{
-            **res['params'],
-            **res['metrics'],
-            'qualified': res['qualified']
-        } for res in results])
-        csv_path = f"{output_dir}/optimization_report_{timestamp}.csv"
-        df.to_csv(csv_path, index=False)
-        
-        # 保存元数据
-        # 只处理合格结果
-        qualified = [res for res in results if res['qualified']]
-        meta = {
-            "optimization_date": timestamp,
-            "total_combinations": len(results),
-            "qualified_count": len(qualified),
-            "best_sharpe": max((res['metrics']['sharpe_ratio'] for res in qualified), default=None)
-        } if qualified else {
-            "optimization_date": timestamp,
-            "total_combinations": len(results),
-            "qualified_count": 0,
-            "best_sharpe": None
-        }
-        json_path = f"{output_dir}/metadata_{timestamp}.json"
-        with open(json_path, 'w') as f:
-            json.dump(meta, f, indent=2)
+        # 显示全局收益最高的组合（即使不合格）
+        best_profit = max(valid_results, 
+                        key=lambda x: x['metrics'].get('annualized_return', -np.inf))
+        print("\n🏆 全局最高收益组合:")
+        for k, v in best_profit['params'].items():
+            print(f"  ▸ {k}: {v}")
+        print(f"  年化收益: {best_profit['metrics']['annualized_return']:.2%}")
+        print(f"  夏普比率: {best_profit['metrics'].get('sharpe_ratio', 0):.2f}")
+        print(f"  最大回撤: {best_profit['metrics']['max_drawdown']:.2%}")
+        print(f"  是否合格: {'✅' if best_profit['qualified'] else '❌'}")
